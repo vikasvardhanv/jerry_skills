@@ -1,0 +1,707 @@
+/*
+ * Copyright OpenSearch Contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import org.opensearch.gradle.test.RestIntegTestTask
+import java.util.concurrent.Callable
+import java.nio.file.Paths
+import com.github.jengelman.gradle.plugins.shadow.ShadowPlugin
+
+buildscript {
+    ext {
+        opensearch_group = "org.opensearch"
+        opensearch_version = System.getProperty("opensearch.version", "3.8.0-SNAPSHOT")
+         buildVersionQualifier = System.getProperty("build.version_qualifier", "")
+        isSnapshot = "true" == System.getProperty("build.snapshot", "true")
+        version_tokens = opensearch_version.tokenize('-')
+        opensearch_build = version_tokens[0] + '.0'
+        plugin_no_snapshot = opensearch_build
+         if (buildVersionQualifier) {
+            opensearch_build += "-${buildVersionQualifier}"
+            plugin_no_snapshot += "-${buildVersionQualifier}"
+        }
+        if (isSnapshot) {
+            opensearch_build += "-SNAPSHOT"
+        }
+        opensearch_no_snapshot = opensearch_build.replace("-SNAPSHOT","")
+
+        kotlin_version = System.getProperty("kotlin.version", "1.8.21")
+    }
+
+    repositories {
+        mavenLocal()
+        maven { url "https://ci.opensearch.org/maven2/" }
+        maven { url "https://ci.opensearch.org/m2/" }
+        mavenCentral()
+        maven { url "https://ci.opensearch.org/ci/dbc/snapshots/maven/" }
+        maven { url "https://plugins.gradle.org/m2/" }
+    }
+
+    dependencies {
+        classpath "${opensearch_group}.gradle:build-tools:${opensearch_version}"
+    }
+}
+
+plugins {
+    id 'java-library'
+    id 'com.diffplug.spotless' version '6.25.0'
+    id "io.freefair.lombok" version "8.10.2"
+    id "de.undercouch.download" version "5.6.0"
+}
+
+lombok {
+    version = "1.18.44"
+}
+
+repositories {
+    mavenLocal()
+    maven { url "https://ci.opensearch.org/maven2/" }
+    maven { url "https://ci.opensearch.org/m2/" }
+    mavenCentral()
+    maven { url "https://plugins.gradle.org/m2/" }
+    maven { url "https://ci.opensearch.org/ci/dbc/snapshots/maven/" }
+}
+
+allprojects {
+    group = opensearch_group
+    version = "${opensearch_build}"
+}
+
+apply plugin: 'java'
+apply plugin: 'jacoco'
+apply plugin: 'idea'
+apply plugin: 'signing'
+apply plugin: 'maven-publish'
+apply plugin: 'opensearch.repositories'
+apply from: 'build-tools/opensearchplugin-coverage.gradle'
+apply plugin: 'opensearch.opensearchplugin'
+apply plugin: 'opensearch.testclusters'
+apply plugin: 'opensearch.pluginzip'
+apply plugin: 'opensearch.java-agent'
+
+java {
+    targetCompatibility = JavaVersion.VERSION_21
+    sourceCompatibility = JavaVersion.VERSION_21
+}
+
+def sqlJarDirectory = "$buildDir/dependencies/opensearch-sql-plugin"
+def jsJarDirectory = "$buildDir/dependencies/opensearch-job-scheduler"
+def adJarDirectory = "$buildDir/dependencies/opensearch-time-series-analytics"
+def sparkDir = "$buildDir/dependencies/spark"
+
+configurations {
+    zipArchive
+    spark {
+        transitive = false
+    }
+    secureIntegTestPluginArchive
+    all {
+        resolutionStrategy {
+            force "org.mockito:mockito-core:${versions.mockito}"
+            force "com.google.guava:guava:33.2.1-jre" // CVE for 31.1
+            force("org.eclipse.platform:org.eclipse.core.runtime:3.30.0") // CVE for < 3.29.0, forces JDK17 for spotless
+            force("org.apache.httpcomponents.client5:httpclient5:${versions.httpclient5}")
+        }
+    }
+}
+
+task addJarsToClasspath(type: Copy) {
+    from(fileTree(dir: sqlJarDirectory)) {
+        include "opensearch-sql-${opensearch_build}.jar"
+        include "ppl-${opensearch_build}.jar"
+        include "protocol-${opensearch_build}.jar"
+    }
+    into("$buildDir/classes")
+
+    from(fileTree(dir: jsJarDirectory)) {
+        include "opensearch-job-scheduler-${opensearch_build}.jar"
+    }
+    into("$buildDir/classes")
+
+    from(fileTree(dir: adJarDirectory)) {
+        include "opensearch-time-series-analytics-${opensearch_build}.jar"
+    }
+    into("$buildDir/classes")
+
+    // spark jar
+    from(fileTree(dir: sparkDir)) {
+        include("*.jar")
+    }
+    into("$buildDir/classes")
+}
+
+
+
+dependencies {
+    // 3P dependencies
+    compileOnly group: 'com.google.code.gson', name: 'gson', version: '2.14.0'
+
+    compileOnly "org.apache.logging.log4j:log4j-slf4j-impl:2.25.4"
+    compileOnly group: 'org.json', name: 'json', version: '20240303'
+    compileOnly("com.google.guava:guava:33.2.1-jre")
+    compileOnly group: 'org.apache.commons', name: 'commons-lang3', version: "${versions.commonslang}"
+    compileOnly group: 'org.apache.commons', name: 'commons-text', version: '1.12.0'
+    compileOnly group: 'org.apache.commons', name: 'commons-math3', version: '3.6.1'
+    compileOnly("com.fasterxml.jackson.core:jackson-annotations:${versions.jackson_annotations}")
+    compileOnly("com.fasterxml.jackson.core:jackson-databind:${versions.jackson_databind}")
+    compileOnly(group: 'org.apache.httpcomponents.core5', name: 'httpcore5', version: "${versions.httpcore5}")
+    compileOnly(group: 'org.apache.httpcomponents.client5', name: 'httpclient5', version: "${versions.httpclient5}")
+    compileOnly ('com.jayway.jsonpath:json-path:2.9.0') {
+        exclude group: 'net.minidev', module: 'json-smart'
+    }
+    compileOnly (group: 'software.amazon.awssdk', name: 'netty-nio-client', version: "${versions.aws}") {
+        exclude(group: 'org.reactivestreams', module: 'reactive-streams')
+        exclude(group: 'org.slf4j', module: 'slf4j-api')
+    }
+    compileOnly(group: 'software.amazon.awssdk', name: 'http-client-spi', version: "${versions.aws}")
+    compileOnly(group: 'software.amazon.awssdk', name: 'utils', version: "${versions.aws}")
+    compileOnly(group: 'software.amazon.awssdk', name: 'sdk-core', version: "${versions.aws}")
+
+    spark 'org.apache.spark:spark-sql-api_2.13:3.5.8'
+    spark ('org.apache.spark:spark-core_2.13:3.5.8') {
+        exclude group: 'org.eclipse.jetty', module: 'jetty-server'
+    }
+    spark group: 'org.apache.spark', name: 'spark-common-utils_2.13', version: '3.5.8'
+
+    implementation 'org.scala-lang:scala-library:2.13.9'
+    implementation group: 'org.antlr', name: 'antlr4-runtime', version: '4.9.3'
+    implementation("org.json4s:json4s-ast_2.13:3.7.0-M11")
+    implementation("org.json4s:json4s-core_2.13:3.7.0-M11")
+    implementation("org.json4s:json4s-jackson_2.13:3.7.0-M11")
+    implementation "com.fasterxml.jackson.module:jackson-module-scala_3:${versions.jackson}"
+    implementation group: 'org.scala-lang', name: 'scala3-library_3', version: '3.7.0-RC1-bin-20250119-bd699fc-NIGHTLY'
+    implementation("com.thoughtworks.paranamer:paranamer:2.8")
+    implementation("org.jsoup:jsoup:1.19.1")
+
+    // Plugin dependencies
+    compileOnly group: 'org.opensearch', name:'opensearch-ml-common', version: "${opensearch_build}"
+    compileOnly group: 'org.opensearch', name:'opensearch-ml-spi', version: "${opensearch_build}"
+    compileOnly fileTree(dir: jsJarDirectory, include: ["opensearch-job-scheduler-${opensearch_build}.jar"])
+    implementation fileTree(dir: adJarDirectory, include: ["opensearch-anomaly-detection-${opensearch_build}.jar"])
+    implementation fileTree(dir: sqlJarDirectory, include: ["opensearch-sql-thin-${opensearch_build}.jar", "ppl-${opensearch_build}.jar", "protocol-${opensearch_build}.jar", "core-${opensearch_build}.jar"])
+    implementation fileTree(dir: sqlJarDirectory, include: ["calcite-*.jar"])
+    implementation fileTree(dir: sparkDir, include: ["spark*.jar"])
+    compileOnly "org.opensearch:common-utils:${opensearch_build}"
+    compileOnly "org.jetbrains.kotlin:kotlin-stdlib:${kotlin_version}"
+    compileOnly "org.opensearch:opensearch-job-scheduler-spi:${opensearch_build}"
+
+
+    // ZipArchive dependencies used for integration tests
+    // The order is important here, we need to make sure opensearch-job-scheduler is before ml-plugin and AD
+    zipArchive group: 'org.opensearch.plugin', name:'opensearch-job-scheduler', version: "${opensearch_build}"
+    zipArchive group: 'org.opensearch.plugin', name:'opensearch-ml-plugin', version: "${opensearch_build}"
+    zipArchive group: 'org.opensearch.plugin', name:'opensearch-anomaly-detection', version: "${opensearch_build}"
+    zipArchive group: 'org.opensearch.plugin', name:'opensearch-sql-plugin', version: "${opensearch_build}"
+    zipArchive group: 'org.opensearch.plugin', name:'opensearch-knn', version: "${opensearch_build}"
+    zipArchive group: 'org.opensearch.plugin', name:'neural-search', version: "${opensearch_build}"
+    zipArchive group: 'org.opensearch.plugin', name:'alerting', version: "${opensearch_build}"
+    secureIntegTestPluginArchive group: 'org.opensearch.plugin', name:'opensearch-security', version: "${opensearch_build}"
+
+    // Test dependencies
+    testImplementation "org.opensearch.test:framework:${opensearch_version}"
+    testImplementation group: 'junit', name: 'junit', version: '4.13.2'
+    testImplementation group: 'org.json', name: 'json', version: '20240303'
+    testImplementation group: 'org.mockito', name: 'mockito-core', version: '5.14.2'
+    testImplementation group: 'org.mockito', name: 'mockito-inline', version: '5.2.0'
+    testImplementation("net.bytebuddy:byte-buddy:1.18.8")
+    testImplementation("net.bytebuddy:byte-buddy-agent:1.18.8")
+    testImplementation("tools.jackson.core:jackson-databind:3.1.3")
+    testImplementation 'org.junit.jupiter:junit-jupiter-api:5.11.2'
+    testImplementation 'org.mockito:mockito-junit-jupiter:5.14.2'
+    testImplementation "com.nhaarman.mockitokotlin2:mockito-kotlin:2.2.0"
+    testImplementation "com.cronutils:cron-utils:9.2.1"
+    testImplementation 'com.jayway.jsonpath:json-path:2.9.0'
+    testImplementation('net.minidev:json-smart:2.5.2')
+    testImplementation 'net.minidev:asm:1.0.2'
+    testImplementation "commons-validator:commons-validator:1.8.0"
+    testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine:5.11.2'
+}
+task addSparkJar(type: Copy) {
+    mustRunAfter()
+    from(configurations.spark)
+    into sparkDir
+
+    doLast {
+        def jarA = file("$sparkDir/spark-sql-api_2.13-3.5.8.jar")
+        def jarB = file("$sparkDir/spark-core_2.13-3.5.8.jar")
+        def jarC = file("$sparkDir/spark-common-utils_2.13-3.5.8.jar")
+
+        // 3a. Extract jar A to manipulate it
+        def jarAContents = file("$buildDir/tmp/JarAContents")
+        delete(jarAContents)
+        jarAContents.mkdirs()
+        copy {
+            from zipTree(jarA)
+            into jarAContents
+        }
+        // Remove the unwanted directory from jar A
+        delete file("${jarAContents}/org/apache/spark/unused")
+
+        // Re-compress jar A
+        ant.zip(destfile: jarA, baseDir: jarAContents)
+
+        // 3b. Repeat for jar B
+        def jarBContents = file("$buildDir/tmp/JarBContents")
+        delete(jarBContents)
+        jarBContents.mkdirs()
+        copy {
+            from zipTree(jarB)
+            into jarBContents
+        }
+        // Remove the unwanted directory from jar B
+        delete file("${jarBContents}/org/apache/spark/unused")
+        delete file("${jarBContents}/org/sparkproject/jetty/http")
+        delete file("${jarBContents}/org/sparkproject/jetty/server")
+        delete file("${jarBContents}/META-INF/maven/org.eclipse.jetty/jetty-http")
+        delete file("${jarBContents}/META-INF/maven/org.eclipse.jetty/jetty-server")
+        // Re-compress jar B
+        ant.zip(destfile: jarB, baseDir: jarBContents)
+
+        def jarCContents = file("$buildDir/tmp/JarBContents")
+        delete(jarCContents)
+        jarCContents.mkdirs()
+        copy {
+            from zipTree(jarC)
+            into jarCContents
+        }
+        // Remove the unwanted directory from jar C
+        delete file("${jarCContents}/org/apache/spark/unused")
+        delete file("${jarCContents}/org/apache/spark/SparkDriverExecutionException.class")
+        delete file("${jarCContents}/org/apache/spark/SparkUserAppException.class")
+        delete file("${jarCContents}/org/apache/spark/SparkUserAppException\$.class")
+        delete file("${jarCContents}/org/apache/spark/SparkUserAppException*class")
+
+
+        // Re-compress jar C
+        ant.zip(destfile: jarC, baseDir: jarCContents)
+    }
+}
+
+
+task extractSqlJar(type: Copy) {
+    mustRunAfter()
+    from(zipTree(configurations.zipArchive.find { it.name.startsWith("opensearch-sql-plugin")}))
+    into sqlJarDirectory
+}
+task extractSqlClass(type: Copy, dependsOn: [extractSqlJar]) {
+    from zipTree("${sqlJarDirectory}/opensearch-sql-${opensearch_build}.jar")
+    into("$buildDir/opensearch-sql")
+    include 'org/opensearch/sql/**'
+}
+
+task replaceSqlJar(type: Jar, dependsOn: [extractSqlClass]) {
+    from("$buildDir/opensearch-sql")
+    archiveFileName = "opensearch-sql-thin-${opensearch_build}.jar"
+    destinationDirectory = file(sqlJarDirectory)
+    doLast {
+        file("${sqlJarDirectory}/opensearch-sql-${opensearch_build}.jar").delete()
+    }
+}
+
+
+task extractJsJar(type: Copy) {
+    mustRunAfter()
+    from(zipTree(configurations.zipArchive.find { it.name.startsWith("opensearch-job-scheduler")}))
+    into jsJarDirectory
+}
+
+task extractAdJar(type: Copy) {
+    mustRunAfter()
+    from(zipTree(configurations.zipArchive.find { it.name.startsWith("opensearch-anomaly-detection")}))
+    into adJarDirectory
+}
+
+tasks.addJarsToClasspath.dependsOn(replaceSqlJar)
+tasks.addJarsToClasspath.dependsOn(extractJsJar)
+tasks.addJarsToClasspath.dependsOn(extractAdJar)
+tasks.addJarsToClasspath.dependsOn(addSparkJar)
+project.tasks.delombok.dependsOn(addJarsToClasspath)
+tasks.publishNebulaPublicationToMavenLocal.dependsOn ':generatePomFileForPluginZipPublication'
+tasks.validateNebulaPom.dependsOn ':generatePomFileForPluginZipPublication'
+
+dependencyLicenses.enabled = false
+loggerUsageCheck.enabled = false
+testingConventions.enabled = false
+thirdPartyAudit.enabled = false
+publishNebulaPublicationToMavenLocal.enabled = false
+
+test {
+    testLogging {
+        exceptionFormat "full"
+        events "skipped", "passed", "failed" // "started"
+        showStandardStreams true
+    }
+    include '**/*Tests.class'
+    systemProperty 'tests.security.manager', 'false'
+}
+
+jacocoTestReport {
+    dependsOn test
+    reports {
+        html.required = true // human readable
+        xml.required = true // for coverlay
+    }
+}
+
+spotless {
+    if (JavaVersion.current() >= JavaVersion.VERSION_17) {
+        // Spotless configuration for Java files
+        java {
+            removeUnusedImports()
+            importOrder 'java', 'javax', 'org', 'com'
+            licenseHeaderFile 'spotless.license.java'
+            eclipse().configFile rootProject.file('.eclipseformat.xml')
+        }
+    } else {
+        logger.lifecycle("Spotless plugin requires Java 17 or higher. Skipping Spotless tasks.")
+    }
+}
+
+compileJava {
+    dependsOn extractSqlJar
+    dependsOn extractJsJar
+    dependsOn extractAdJar
+    dependsOn delombok
+    options.compilerArgs.addAll(["-processor", 'lombok.launch.AnnotationProcessorHider$AnnotationProcessor'])
+}
+
+compileTestJava {
+    options.compilerArgs.addAll(["-processor", 'lombok.launch.AnnotationProcessorHider$AnnotationProcessor'])
+}
+
+forbiddenApisTest.ignoreFailures = true
+
+
+opensearchplugin {
+    name 'opensearch-skills'
+    description 'OpenSearch Skills'
+    classname 'org.opensearch.agent.ToolPlugin'
+    extendedPlugins = ['opensearch-ml']
+    licenseFile rootProject.file("LICENSE.txt")
+    noticeFile rootProject.file("NOTICE")
+}
+
+def opensearch_tmp_dir = rootProject.file('build/private/opensearch_tmp').absoluteFile
+opensearch_tmp_dir.mkdirs()
+
+ext {
+    projectSubstitutions = [:]
+    isSnapshot = "true" == System.getProperty("build.snapshot", "true")
+}
+
+allprojects {
+    // Default to the apache license
+    project.ext.licenseName = 'The Apache Software License, Version 2.0'
+    project.ext.licenseUrl = 'http://www.apache.org/licenses/LICENSE-2.0.txt'
+    plugins.withType(ShadowPlugin).whenPluginAdded {
+        publishing {
+            repositories {
+                maven {
+                    name = 'staging'
+                    url = "${rootProject.buildDir}/local-staging-repo"
+                }
+            }
+            publications {
+                // add license information to generated poms
+                all {
+                    pom {
+                        name = "skills"
+                        description = "Tools for Agent Framework"
+                    }
+                    pom.withXml { XmlProvider xml ->
+                        Node node = xml.asNode()
+                        node.appendNode('inceptionYear', '2021')
+
+                        Node license = node.appendNode('licenses').appendNode('license')
+                        license.appendNode('name', project.licenseName)
+                        license.appendNode('url', project.licenseUrl)
+
+                        Node developer = node.appendNode('developers').appendNode('developer')
+                        developer.appendNode('name', 'OpenSearch')
+                        developer.appendNode('url', 'https://github.com/opensearch-project/')skills
+                    }
+                }
+            }
+        }
+    }
+}
+
+publishing {
+    publications {
+        pluginZip(MavenPublication) { publication ->
+            pom {
+                name = "OpenSearch Skills"
+                description = "OpenSearch Skills"
+                groupId = "org.opensearch.plugin"
+                licenses {
+                    license {
+                        name = "The Apache License, Version 2.0"
+                        url = "http://www.apache.org/licenses/LICENSE-2.0.txt"
+                    }
+                }
+                developers {
+                    developer {
+                        name = "OpenSearch"
+                        url = "https://github.com/opensearch-project/skills"
+                    }
+                }
+            }
+        }
+    }
+    repositories {
+        maven {
+            name = "Snapshots"
+            url = System.getenv("MAVEN_SNAPSHOTS_S3_REPO")
+            credentials(AwsCredentials) {
+                accessKey = System.getenv("AWS_ACCESS_KEY_ID")
+                secretKey = System.getenv("AWS_SECRET_ACCESS_KEY")
+                sessionToken = System.getenv("AWS_SESSION_TOKEN")
+            }
+        }
+    }
+    gradle.startParameter.setShowStacktrace(ShowStacktrace.ALWAYS)
+    gradle.startParameter.setLogLevel(LogLevel.DEBUG)
+}
+
+def _numNodes = findProperty('numNodes') as Integer ?: 1
+
+// Set up integration tests
+task integTest(type: RestIntegTestTask) {
+    description = "Run tests against a cluster"
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+}
+tasks.named("check").configure { dependsOn(integTest) }
+
+integTest {
+    dependsOn "bundlePlugin"
+    systemProperty 'tests.security.manager', 'false'
+    systemProperty 'java.io.tmpdir', opensearch_tmp_dir.absolutePath
+    systemProperty('project.root', project.rootDir.absolutePath)
+    systemProperty "https", System.getProperty("https")
+    systemProperty "user", System.getProperty("user")
+    systemProperty "password", System.getProperty("password")
+
+    systemProperty 'security.enabled', System.getProperty('security.enabled')
+    var is_https = System.getProperty("https")
+    var user = System.getProperty("user")
+    var password = System.getProperty("password")
+
+    if (System.getProperty("security.enabled") != null) {
+        // If security is enabled, set is_https/user/password defaults
+        // admin password is permissable here since the security plugin is manually configured using the default internal_users.yml configuration
+        is_https = is_https == null ? "true" : is_https
+        user = user == null ? "admin" : user
+        password = password == null ? "admin" : password
+        System.setProperty("https", is_https)
+        System.setProperty("user", user)
+        System.setProperty("password", password)
+    }
+
+    systemProperty("https", is_https)
+    systemProperty("user", user)
+    systemProperty("password", password)
+
+    // Certain integ tests require system index manipulation to properly test. We exclude those
+    // in the security-enabled scenario since this action is prohibited by security plugin.
+    if (System.getProperty("https") != null && System.getProperty("https") == "true") {
+        filter {
+            excludeTestsMatching "org.opensearch.integTest.SearchAlertsToolIT"
+            excludeTestsMatching "org.opensearch.integTest.SearchAnomalyResultsToolIT"
+        }
+    }
+
+
+    // doFirst delays this block until execution time
+    doFirst {
+        // Tell the test JVM if the cluster JVM is running under a debugger so that tests can
+        // use longer timeouts for requests.
+        def isDebuggingCluster = getDebug() || System.getProperty("test.debug") != null
+        systemProperty 'cluster.debug', isDebuggingCluster
+        // Set number of nodes system property to be used in tests
+        systemProperty 'cluster.number_of_nodes', "${_numNodes}"
+        // There seems to be an issue when running multi node run or integ tasks with unicast_hosts
+        // not being written, the waitForAllConditions ensures it's written
+        getClusters().forEach { cluster ->
+            cluster.waitForAllConditions()
+        }
+    }
+
+    // The --debug-jvm command-line option makes the cluster debuggable; this makes the tests debuggable
+    if (System.getProperty("test.debug") != null) {
+        jvmArgs '-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=*:5005'
+    }
+}
+// Set up integration test clusters, installs all zipArchive dependencies and this plugin
+testClusters.integTest {
+    testDistribution = "ARCHIVE"
+
+    // Optionally install security
+    if (System.getProperty("security.enabled") != null) {
+         configurations.secureIntegTestPluginArchive.asFileTree.each {
+            if(it.name.contains("opensearch-security")){
+                plugin(provider(new Callable<RegularFile>() {
+                    @Override
+                    RegularFile call() throws Exception {
+                        return new RegularFile() {
+                            @Override
+                            File getAsFile() {
+                                return it
+                            }
+                        }
+                    }
+                }))
+            }
+        }
+
+        getNodes().forEach { node ->
+            var creds = node.getCredentials()
+            // admin password is permissable here since the security plugin is manually configured using the default internal_users.yml configuration
+            if (creds.isEmpty()) {
+                creds.add(Map.of('username', 'admin', 'password', 'admin'))
+            } else {
+                creds.get(0).putAll(Map.of('username', 'admin', 'password', 'admin'))
+            }
+        }
+
+        // Config below including files are copied from security demo configuration
+        ['esnode.pem', 'esnode-key.pem', 'root-ca.pem','kirk.pem','kirk-key.pem'].forEach { file ->
+            File local = Paths.get(opensearch_tmp_dir.absolutePath, file).toFile()
+            download.run {
+                src "https://raw.githubusercontent.com/opensearch-project/security/main/bwc-test/src/test/resources/security/" + file
+                dest local
+                overwrite false
+            }
+        }
+
+        // // Config below including files are copied from security demo configuration
+        extraConfigFile("esnode.pem", file("$opensearch_tmp_dir/esnode.pem"))
+        extraConfigFile("esnode-key.pem", file("$opensearch_tmp_dir/esnode-key.pem"))
+        extraConfigFile("root-ca.pem", file("$opensearch_tmp_dir/root-ca.pem"))
+
+        // This configuration is copied from the security plugins demo install:
+        // https://github.com/opensearch-project/security/blob/2.11.1.0/tools/install_demo_configuration.sh#L365-L388
+        setting("plugins.security.ssl.transport.pemcert_filepath", "esnode.pem")
+        setting("plugins.security.ssl.transport.pemkey_filepath", "esnode-key.pem")
+        setting("plugins.security.ssl.transport.pemtrustedcas_filepath", "root-ca.pem")
+        setting("plugins.security.ssl.transport.enforce_hostname_verification", "false")
+        setting("plugins.security.ssl.http.enabled", "true")
+        setting("plugins.security.ssl.http.pemcert_filepath", "esnode.pem")
+        setting("plugins.security.ssl.http.pemkey_filepath", "esnode-key.pem")
+        setting("plugins.security.ssl.http.pemtrustedcas_filepath", "root-ca.pem")
+        setting("plugins.security.allow_unsafe_democertificates", "true")
+        setting("plugins.security.allow_default_init_securityindex", "true")
+        setting("plugins.security.unsupported.inject_user.enabled", "true")
+
+        setting("plugins.security.authcz.admin_dn", "\n- CN=kirk,OU=client,O=client,L=test, C=de")
+        setting('plugins.security.restapi.roles_enabled', '["all_access", "security_rest_api_access"]')
+        setting('plugins.security.system_indices.enabled', "true")
+        setting('plugins.security.system_indices.indices', '[' +
+                '".plugins-ml-config", ' +
+                '".plugins-ml-connector", ' +
+                '".plugins-ml-model-group", ' +
+                '".plugins-ml-model", ".plugins-ml-task", ' +
+                '".plugins-ml-conversation-meta", ' +
+                '".plugins-ml-conversation-interactions", ' +
+                '".opendistro-alerting-config", ' +
+                '".opendistro-alerting-alert*", ' +
+                '".opendistro-anomaly-results*", ' +
+                '".opendistro-anomaly-detector*", ' +
+                '".opendistro-anomaly-checkpoints", ' +
+                '".opendistro-anomaly-detection-state", ' +
+                '".opendistro-reports-*", ' +
+                '".opensearch-notifications-*", ' +
+                '".opensearch-notebooks", ' +
+                '".opensearch-observability", ' +
+                '".ql-datasources", ' +
+                '".opendistro-asynchronous-search-response*", ' +
+                '".replication-metadata-store", ' +
+                '".opensearch-knn-models", ' +
+                '".geospatial-ip2geo-data*", ' +
+                '".plugins-flow-framework-config", ' +
+                '".plugins-flow-framework-templates", ' +
+                '".plugins-flow-framework-state"' +
+                ']'
+        )
+        setSecure(true)
+    }
+
+    // Installs all registered zipArchive dependencies on integTest cluster nodes
+    configurations.zipArchive.asFileTree.each {
+        plugin(provider(new Callable<RegularFile>(){
+            @Override
+            RegularFile call() throws Exception {
+                return new RegularFile() {
+                    @Override
+                    File getAsFile() {
+                        return it
+                    }
+                }
+            }
+        }))
+    }
+
+    // Install skills plugin on integTest cluster nodes
+    plugin(project.tasks.bundlePlugin.archiveFile)
+
+    // Cluster shrink exception thrown if we try to set numberOfNodes to 1, so only apply if > 1
+    if (_numNodes > 1) numberOfNodes = _numNodes
+
+    // When running integration tests it doesn't forward the --debug-jvm to the cluster anymore
+    // i.e. we have to use a custom property to flag when we want to debug OpenSearch JVM
+    // since we also support multi node integration tests we increase debugPort per node
+    if (System.getProperty("opensearch.debug") != null) {
+        def debugPort = 5005
+        nodes.forEach { node ->
+            node.jvmArgs("-agentlib:jdwp=transport=dt_socket,server=n,suspend=y,address=*:${debugPort}")
+            debugPort += 1
+        }
+    }
+}
+
+// Remote Integration Tests
+task integTestRemote(type: RestIntegTestTask) {
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+
+    systemProperty "https", System.getProperty("https")
+    systemProperty "user", System.getProperty("user")
+    systemProperty "password", System.getProperty("password")
+
+    systemProperty 'cluster.number_of_nodes', "${_numNodes}"
+
+    systemProperty 'tests.security.manager', 'false'
+    // Run tests with remote cluster only if rest case is defined
+    if (System.getProperty("tests.rest.cluster") != null) {
+        filter {
+            includeTestsMatching "org.opensearch.integTest.*IT"
+        }
+    }
+
+    // Certain integ tests require system index manipulation to properly test. We exclude those
+    // in the security-enabled scenario since this action is prohibited by security plugin.
+    if (System.getProperty("https") != null && System.getProperty("https") == "true") {
+        filter {
+            excludeTestsMatching "org.opensearch.integTest.SearchAlertsToolIT"
+            excludeTestsMatching "org.opensearch.integTest.SearchAnomalyResultsToolIT"
+        }
+    }
+}
+
+// Automatically sets up the integration test cluster locally
+run {
+    useCluster testClusters.integTest
+}
+
+// updateVersion: Task to auto increment to the next development iteration
+task updateVersion {
+    onlyIf { System.getProperty('newVersion') }
+    doLast {
+        ext.newVersion = System.getProperty('newVersion')
+        println "Setting version to ${newVersion}."
+        // String tokenization to support -SNAPSHOT
+        // Include the required files that needs to be updated with new Version
+        ant.replaceregexp(file:'build.gradle', match: '"opensearch.version", "\\d.*"', replace: '"opensearch.version", "' + newVersion.tokenize('-')[0] + '-SNAPSHOT"', flags:'g', byline:true)
+    }
+}

@@ -1,0 +1,9 @@
+{
+  "name": "Test_Search_Monitors_Agent",
+  "type": "flow",
+  "tools": [
+    {
+      "type": "SearchMonitorsTool"
+    }
+  ]
+}

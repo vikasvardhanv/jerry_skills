@@ -1,0 +1,7 @@
+[
+  {
+    "sample logs": ["123.abc-AB * De /", "45.abc-AB * De /", "12.abc_AB * De /", "45.ab_AB * De /", ".abAB * De /"],
+    "total count": 5,
+    "pattern": "<*> * De /"
+  }
+]
